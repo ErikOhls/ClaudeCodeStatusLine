@@ -132,36 +132,33 @@ if [ -z "$cli_version" ]; then
     fi
 fi
 
-# ===== Build single-line output =====
-out=""
-out+="${blue}${model_name}${reset}"
+# ===== Build per-segment output (assembled in custom order at the end) =====
+seg_model="${blue}${model_name}${reset}"
 
-# Current working directory
+# Tokens
+seg_tokens="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
+
+# Effort (level only, no "effort:" prefix)
+case "$effort_level" in
+    low)    seg_effort="${dim}${effort_level}${reset}" ;;
+    medium) seg_effort="${orange}med${reset}" ;;
+    high)   seg_effort="${green}${effort_level}${reset}" ;;
+    xhigh)  seg_effort="${purple}${effort_level}${reset}" ;;
+    max)    seg_effort="${red}${effort_level}${reset}" ;;
+    *)      seg_effort="${green}${effort_level}${reset}" ;;
+esac
+
+# Git branch only (no directory name)
 cwd=$(echo "$input" | jq -r '.cwd // empty')
+seg_branch=""
 if [ -n "$cwd" ]; then
-    display_dir="${cwd##*/}"
     git_branch=$(git -C "${cwd}" rev-parse --abbrev-ref HEAD 2>/dev/null)
-    out+=" ${dim}|${reset} "
-    out+="${cyan}${display_dir}${reset}"
     if [ -n "$git_branch" ]; then
-        out+="${dim}@${reset}${green}${git_branch}${reset}"
+        seg_branch="${green}${git_branch}${reset}"
         git_stat=$(git -C "${cwd}" diff --numstat 2>/dev/null | awk '{a+=$1; d+=$2} END {if (a+d>0) printf "+%d -%d", a, d}')
-        [ -n "$git_stat" ] && out+=" ${dim}(${reset}${green}${git_stat%% *}${reset} ${red}${git_stat##* }${reset}${dim})${reset}"
+        [ -n "$git_stat" ] && seg_branch+=" ${dim}(${reset}${green}${git_stat%% *}${reset} ${red}${git_stat##* }${reset}${dim})${reset}"
     fi
 fi
-
-out+=" ${dim}|${reset} "
-out+="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
-out+=" ${dim}|${reset} "
-out+="effort: "
-case "$effort_level" in
-    low)    out+="${dim}${effort_level}${reset}" ;;
-    medium) out+="${orange}med${reset}" ;;
-    high)   out+="${green}${effort_level}${reset}" ;;
-    xhigh)  out+="${purple}${effort_level}${reset}" ;;
-    max)    out+="${red}${effort_level}${reset}" ;;
-    *)      out+="${green}${effort_level}${reset}" ;;
-esac
 
 # ===== Cross-platform OAuth token resolution (from statusline.sh) =====
 # Tries credential sources in order: env var → macOS Keychain → Linux creds file → GNOME Keyring
@@ -369,6 +366,17 @@ format_reset_time() {
     [ -n "$formatted" ] && echo "$formatted"
 }
 
+# Hours until a future epoch timestamp, rounded up (floored at 0). Empty if invalid.
+hours_until() {
+    local target="$1"
+    { [ -z "$target" ] || [ "$target" = "null" ] || [ "$target" = "0" ]; } && return
+    local now diff
+    now=$(date +%s)
+    diff=$(( target - now ))
+    [ "$diff" -lt 0 ] && diff=0
+    echo $(( (diff + 3599) / 3600 ))
+}
+
 sep=" ${dim}|${reset} "
 
 # Render extra_usage segment from API usage data (not available via stdin rate_limits).
@@ -388,9 +396,9 @@ render_extra_usage() {
     if [ -n "$used" ] && [ -n "$limit" ] && [[ "$used" != *'$'* ]] && [[ "$limit" != *'$'* ]]; then
         local color
         color=$(usage_color "$pct")
-        out+="${sep}${white}extra${reset} ${color}\$${used}/\$${limit}${reset}"
+        seg_extra="${white}extra${reset} ${color}\$${used}/\$${limit}${reset}"
     else
-        out+="${sep}${white}extra${reset} ${green}enabled${reset}"
+        seg_extra="${white}extra${reset} ${green}enabled${reset}"
     fi
 }
 
@@ -400,21 +408,17 @@ if $effective_builtin; then
     if [ -n "$builtin_five_hour_pct" ]; then
         five_hour_pct=$(printf "%.0f" "$builtin_five_hour_pct")
         five_hour_color=$(usage_color "$five_hour_pct")
-        out+="${sep}${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
-        if [ -n "$builtin_five_hour_reset" ] && [ "$builtin_five_hour_reset" != "null" ]; then
-            five_hour_reset=$(date -j -r "$builtin_five_hour_reset" +"%H:%M" 2>/dev/null || date -d "@$builtin_five_hour_reset" +"%H:%M" 2>/dev/null)
-            [ -n "$five_hour_reset" ] && out+=" ${dim}@${five_hour_reset}${reset}"
-        fi
+        seg_5h="${five_hour_color}${five_hour_pct}%${reset}"
+        fh_hours=$(hours_until "$builtin_five_hour_reset")
+        [ -n "$fh_hours" ] && seg_5h+=" ${dim}${fh_hours}h${reset}"
     fi
 
     if [ -n "$builtin_seven_day_pct" ]; then
         seven_day_pct=$(printf "%.0f" "$builtin_seven_day_pct")
         seven_day_color=$(usage_color "$seven_day_pct")
-        out+="${sep}${white}7d${reset} ${seven_day_color}${seven_day_pct}%${reset}"
-        if [ -n "$builtin_seven_day_reset" ] && [ "$builtin_seven_day_reset" != "null" ]; then
-            seven_day_reset=$(date -j -r "$builtin_seven_day_reset" +"%a %b %-d, %H:%M" 2>/dev/null || date -d "@$builtin_seven_day_reset" +"%a %b %-d, %H:%M" 2>/dev/null)
-            [ -n "$seven_day_reset" ] && out+=" ${dim}@${seven_day_reset}${reset}"
-        fi
+        seg_7d="${seven_day_color}${seven_day_pct}%${reset}"
+        sd_hours=$(hours_until "$builtin_seven_day_reset")
+        [ -n "$sd_hours" ] && seg_7d+=" ${dim}${sd_hours}h${reset}"
     fi
 
     # Render extra_usage from API cache (stdin rate_limits doesn't expose it)
@@ -446,26 +450,24 @@ elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 
     # ---- 5-hour (current) ----
     five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
     five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
-    five_hour_reset=$(format_reset_time "$five_hour_reset_iso" "time")
     five_hour_color=$(usage_color "$five_hour_pct")
-
-    out+="${sep}${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
-    [ -n "$five_hour_reset" ] && out+=" ${dim}@${five_hour_reset}${reset}"
+    seg_5h="${five_hour_color}${five_hour_pct}%${reset}"
+    fh_hours=$(hours_until "$(iso_to_epoch "$five_hour_reset_iso")")
+    [ -n "$fh_hours" ] && seg_5h+=" ${dim}${fh_hours}h${reset}"
 
     # ---- 7-day (weekly) ----
     seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
     seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
-    seven_day_reset=$(format_reset_time "$seven_day_reset_iso" "datetime")
     seven_day_color=$(usage_color "$seven_day_pct")
-
-    out+="${sep}${white}7d${reset} ${seven_day_color}${seven_day_pct}%${reset}"
-    [ -n "$seven_day_reset" ] && out+=" ${dim}@${seven_day_reset}${reset}"
+    seg_7d="${seven_day_color}${seven_day_pct}%${reset}"
+    sd_hours=$(hours_until "$(iso_to_epoch "$seven_day_reset_iso")")
+    [ -n "$sd_hours" ] && seg_7d+=" ${dim}${sd_hours}h${reset}"
 
     render_extra_usage "$usage_data"
 else
     # No valid usage data — show placeholders
-    out+="${sep}${white}5h${reset} ${dim}-${reset}"
-    out+="${sep}${white}7d${reset} ${dim}-${reset}"
+    seg_5h="${dim}-${reset}"
+    seg_7d="${dim}-${reset}"
 fi
 
 # ===== Update check (cached, 24h TTL) =====
@@ -509,10 +511,21 @@ if [ "${STATUSLINE_CHECK_UPDATES:-true}" != "false" ]; then
     fi
 fi
 
-# Append CLI version as last segment
+# CLI version segment
 if [ -n "$cli_version" ]; then
-    out+=" ${dim}|${reset} ${orange}v${cli_version}${reset}"
+    seg_version="${orange}v${cli_version}${reset}"
 fi
+
+# ===== Assemble in custom order: model | tokens | effort | 5h | 7d | extra | branch | version =====
+out=""
+for s in "$seg_model" "$seg_tokens" "$seg_effort" "$seg_5h" "$seg_7d" "$seg_extra" "$seg_branch" "$seg_version"; do
+    [ -z "$s" ] && continue
+    if [ -z "$out" ]; then
+        out="$s"
+    else
+        out+="${sep}${s}"
+    fi
+done
 
 # Output
 printf "%b" "$out$update_line"
