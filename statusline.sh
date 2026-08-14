@@ -52,6 +52,17 @@ usage_color() {
     fi
 }
 
+# Return color escape for the context-window fill percentage. Deliberately tighter than
+# usage_color: a filling context window degrades attention long before it is actually full.
+# Usage: context_color <pct>
+context_color() {
+    local pct=$1
+    if [ "$pct" -gt 50 ]; then echo "$red"
+    elif [ "$pct" -gt 30 ]; then echo "$yellow"
+    else echo "$green"
+    fi
+}
+
 # Resolve config directory: CLAUDE_CONFIG_DIR (set by alias) or default ~/.claude
 claude_config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
@@ -136,7 +147,8 @@ fi
 seg_model="${blue}${model_name}${reset}"
 
 # Tokens
-seg_tokens="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
+pct_used_color=$(context_color "$pct_used")
+seg_tokens="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${pct_used_color}${pct_used}%${reset}${dim})${reset}"
 
 # Effort (level only, no "effort:" prefix)
 case "$effort_level" in
@@ -366,18 +378,73 @@ format_reset_time() {
     [ -n "$formatted" ] && echo "$formatted"
 }
 
-# Hours until a future epoch timestamp, rounded up (floored at 0). Empty if invalid.
-hours_until() {
+# Seconds remaining until a future epoch timestamp (floored at 0). Empty if invalid.
+seconds_until() {
     local target="$1"
     { [ -z "$target" ] || [ "$target" = "null" ] || [ "$target" = "0" ]; } && return
     local now diff
     now=$(date +%s)
     diff=$(( target - now ))
     [ "$diff" -lt 0 ] && diff=0
-    echo $(( (diff + 3599) / 3600 ))
+    echo "$diff"
+}
+
+# Compact duration from a second count. Renders the two most significant units,
+# dropping a trailing zero unit: "1d22h", "2d", "3h5m", "4h", "30m", "0m".
+# Minutes are rounded up so a window with time left never reads as the next unit down.
+format_duration() {
+    local secs="$1"
+    [ -z "$secs" ] && return
+    local total_mins days hours mins
+    total_mins=$(( (secs + 59) / 60 ))
+    days=$(( total_mins / 1440 ))
+    hours=$(( (total_mins % 1440) / 60 ))
+    mins=$(( total_mins % 60 ))
+    if [ "$days" -gt 0 ]; then
+        if [ "$hours" -gt 0 ]; then echo "${days}d${hours}h"; else echo "${days}d"; fi
+    elif [ "$hours" -gt 0 ]; then
+        if [ "$mins" -gt 0 ]; then echo "${hours}h${mins}m"; else echo "${hours}h"; fi
+    else
+        echo "${mins}m"
+    fi
 }
 
 sep=" ${dim}|${reset} "
+# Separates a rate-limit percentage from its reset countdown: "42% · 30m"
+dot=" ${dim}·${reset} "
+
+# Rate-limit window lengths, needed to judge usage against how far the window has run.
+five_hour_window_secs=18000    # 5 hours
+seven_day_window_secs=604800   # 7 days
+
+# Color a reset countdown by burn rate: extrapolate current usage to the end of the window.
+# Spending the window's tokens evenly lands on 100%; under 80% of that pace is green,
+# 80-120% is yellow, over 120% is red. Halfway through a window that works out to exactly
+# under 40% used green, 40-60% yellow, over 60% red — and because the comparison is
+# proportional rather than a fixed offset, it stays meaningful at both ends of the window.
+# Compared as cross-multiplied integers (used/100 vs 0.8-1.2 x elapsed/window) so the
+# verdict loses nothing to rounding.
+# Usage: pace_color <seconds_left> <window_seconds> <used_pct>
+pace_color() {
+    local secs_left="$1" window="$2" used="$3"
+    if [ -z "$secs_left" ] || [ -z "$used" ] || [ -z "$window" ] || [ "$window" -le 0 ]; then
+        echo "$dim"
+        return
+    fi
+    local elapsed=$(( window - secs_left ))
+    # Nothing elapsed yet (or the window is longer than we assume): no pace to judge.
+    if [ "$elapsed" -le 0 ]; then
+        echo "$green"
+        return
+    fi
+    if [ $(( used * window )) -lt $(( 80 * elapsed )) ]; then
+        echo "$green"
+    elif [ $(( used * window )) -gt $(( 120 * elapsed )) ]; then
+        echo "$red"
+    else
+        echo "$yellow"
+    fi
+}
 
 # Render extra_usage segment from API usage data (not available via stdin rate_limits).
 # Appends to the global $out. No-op when data is missing or is_enabled is false.
@@ -409,16 +476,22 @@ if $effective_builtin; then
         five_hour_pct=$(printf "%.0f" "$builtin_five_hour_pct")
         five_hour_color=$(usage_color "$five_hour_pct")
         seg_5h="${five_hour_color}${five_hour_pct}%${reset}"
-        fh_hours=$(hours_until "$builtin_five_hour_reset")
-        [ -n "$fh_hours" ] && seg_5h+=" ${dim}${fh_hours}h${reset}"
+        fh_secs=$(seconds_until "$builtin_five_hour_reset")
+        if [ -n "$fh_secs" ]; then
+            fh_pace=$(pace_color "$fh_secs" "$five_hour_window_secs" "$five_hour_pct")
+            seg_5h+="${dot}${fh_pace}$(format_duration "$fh_secs")${reset}"
+        fi
     fi
 
     if [ -n "$builtin_seven_day_pct" ]; then
         seven_day_pct=$(printf "%.0f" "$builtin_seven_day_pct")
         seven_day_color=$(usage_color "$seven_day_pct")
         seg_7d="${seven_day_color}${seven_day_pct}%${reset}"
-        sd_hours=$(hours_until "$builtin_seven_day_reset")
-        [ -n "$sd_hours" ] && seg_7d+=" ${dim}${sd_hours}h${reset}"
+        sd_secs=$(seconds_until "$builtin_seven_day_reset")
+        if [ -n "$sd_secs" ]; then
+            sd_pace=$(pace_color "$sd_secs" "$seven_day_window_secs" "$seven_day_pct")
+            seg_7d+="${dot}${sd_pace}$(format_duration "$sd_secs")${reset}"
+        fi
     fi
 
     # Render extra_usage from API cache (stdin rate_limits doesn't expose it)
@@ -452,16 +525,22 @@ elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 
     five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
     five_hour_color=$(usage_color "$five_hour_pct")
     seg_5h="${five_hour_color}${five_hour_pct}%${reset}"
-    fh_hours=$(hours_until "$(iso_to_epoch "$five_hour_reset_iso")")
-    [ -n "$fh_hours" ] && seg_5h+=" ${dim}${fh_hours}h${reset}"
+    fh_secs=$(seconds_until "$(iso_to_epoch "$five_hour_reset_iso")")
+    if [ -n "$fh_secs" ]; then
+        fh_pace=$(pace_color "$fh_secs" "$five_hour_window_secs" "$five_hour_pct")
+        seg_5h+="${dot}${fh_pace}$(format_duration "$fh_secs")${reset}"
+    fi
 
     # ---- 7-day (weekly) ----
     seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
     seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
     seven_day_color=$(usage_color "$seven_day_pct")
     seg_7d="${seven_day_color}${seven_day_pct}%${reset}"
-    sd_hours=$(hours_until "$(iso_to_epoch "$seven_day_reset_iso")")
-    [ -n "$sd_hours" ] && seg_7d+=" ${dim}${sd_hours}h${reset}"
+    sd_secs=$(seconds_until "$(iso_to_epoch "$seven_day_reset_iso")")
+    if [ -n "$sd_secs" ]; then
+        sd_pace=$(pace_color "$sd_secs" "$seven_day_window_secs" "$seven_day_pct")
+        seg_7d+="${dot}${sd_pace}$(format_duration "$sd_secs")${reset}"
+    fi
 
     render_extra_usage "$usage_data"
 else
