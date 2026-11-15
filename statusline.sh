@@ -3,7 +3,7 @@
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 set -f  # disable globbing
-VERSION="1.4.4"
+VERSION="1.4.5"
 
 input=$(cat)
 
@@ -150,15 +150,16 @@ seg_model="${blue}${model_name}${reset}"
 pct_used_color=$(context_color "$pct_used")
 seg_tokens="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${pct_used_color}${pct_used}%${reset}${dim})${reset}"
 
-# Effort (level only, no "effort:" prefix)
+# Effort, shown in parentheses after the model name: "Model (effort)"
 case "$effort_level" in
-    low)    seg_effort="${dim}${effort_level}${reset}" ;;
-    medium) seg_effort="${orange}med${reset}" ;;
-    high)   seg_effort="${green}${effort_level}${reset}" ;;
-    xhigh)  seg_effort="${purple}${effort_level}${reset}" ;;
-    max)    seg_effort="${red}${effort_level}${reset}" ;;
-    *)      seg_effort="${green}${effort_level}${reset}" ;;
+    low)    effort_txt="${dim}${effort_level}${reset}" ;;
+    medium) effort_txt="${orange}med${reset}" ;;
+    high)   effort_txt="${green}${effort_level}${reset}" ;;
+    xhigh)  effort_txt="${purple}${effort_level}${reset}" ;;
+    max)    effort_txt="${red}${effort_level}${reset}" ;;
+    *)      effort_txt="${green}${effort_level}${reset}" ;;
 esac
+seg_model+=" ${dim}(${reset}${effort_txt}${dim})${reset}"
 
 # Git branch only (no directory name)
 cwd=$(echo "$input" | jq -r '.cwd // empty')
@@ -595,9 +596,9 @@ if [ -n "$cli_version" ]; then
     seg_version="${orange}v${cli_version}${reset}"
 fi
 
-# ===== Assemble in custom order: model | tokens | effort | 5h | 7d | extra | branch | version =====
+# ===== Assemble in custom order: model (effort) | tokens | 5h | 7d | extra | branch | version =====
 out=""
-for s in "$seg_model" "$seg_tokens" "$seg_effort" "$seg_5h" "$seg_7d" "$seg_extra" "$seg_branch" "$seg_version"; do
+for s in "$seg_model" "$seg_tokens" "$seg_5h" "$seg_7d" "$seg_extra" "$seg_branch" "$seg_version"; do
     [ -z "$s" ] && continue
     if [ -z "$out" ]; then
         out="$s"
